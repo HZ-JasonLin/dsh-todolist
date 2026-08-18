@@ -1,0 +1,25 @@
+{
+  "name": "dsh-todolist",
+  "version": "0.1.0",
+  "description": "An independent todo board for DeepSeek Harness: list/board/calendar/week/project views, AI tools (todolist / todolist_suggest), and a self-contained storage backend. Registers a top-level Todos tab; registers a right-sidebar Today tab when dsh-better-sidebar is present, otherwise provides a standalone Today sidebar.",
+  "private": false,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs"
+  },
+  "license": "MIT",
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    }
+  }
+}
