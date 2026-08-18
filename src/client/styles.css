@@ -4780,12 +4780,10 @@
   }
 }
 
-/* Standalone Today panel: mirrors better-sidebar's right workbench chrome. */
-#root {
-  margin-right: var(--dsh-todolist-sidebar-width, 0px);
-  transition: margin-right var(--ds-transition-duration-slow) var(--ds-ease-in-out);
-}
-
+/* Standalone Today panel: mirrors better-sidebar's right workbench chrome.
+ * NOTE: no unconditional `#root { margin-right }` rule here — that would
+ * override dsh-better-sidebar's own layout push. The fallback pushes #root
+ * via inline style (setProperty !important) from the component instead. */
 .todo-fallback-toggle-button {
   appearance: none;
   display: flex;
@@ -4884,9 +4882,5 @@ body[data-dsh-todolist-dragging] #root {
 
   .todo-fallback-resize {
     display: none;
-  }
-
-  #root {
-    margin-right: 0 !important;
   }
 }
