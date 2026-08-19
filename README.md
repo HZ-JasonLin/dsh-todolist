@@ -1,4 +1,4 @@
-# dsh-todolist
+# @hz-jasonlin/dsh-todolist
 
 An independent todo board plugin for DeepSeek Harness.
 
@@ -19,9 +19,22 @@ An independent todo board plugin for DeepSeek Harness.
 
 ## Installation / 安装
 
+插件已发布到 npm，推荐直接用 DSH 插件 CLI 安装：
+
 ```powershell
-# 从源码构建并安装（推荐开发环境）
-git clone <repository-url>
+dsh plugin --profile web add @hz-jasonlin/dsh-todolist
+```
+
+也可以从 GitHub 安装：
+
+```powershell
+dsh plugin --profile web add github:HZ-JasonLin/dsh-todolist
+```
+
+从源码构建（仅开发环境）：
+
+```powershell
+git clone https://github.com/HZ-JasonLin/dsh-todolist.git
 cd dsh-todolist
 npm install
 
@@ -30,13 +43,7 @@ $env:DSH_SOURCE="<your-dsh-esbuild-environment>"   # 仅当本地构建环境需
 node scripts/build.mjs
 ```
 
-发布后也可以通过 DSH 插件 CLI 安装：
-
-```powershell
-dsh plugin --profile web add github:<repository-url>
-```
-
-插件可以独立使用，不要求安装 `dsh-better-sidebar`。只安装 `dsh-todolist` 时，顶部「待办」Tab 和完整待办功能仍然可用，同时会启用独立的 Today 侧栏。
+插件可以独立使用，不要求安装 `dsh-better-sidebar`。只安装 `@hz-jasonlin/dsh-todolist` 时，顶部「待办」Tab 和完整待办功能仍然可用，同时会启用独立的 Today 侧栏。
 
 如果同时安装了 `dsh-better-sidebar`，fallback 会自动停用，插件改为向 better-sidebar 注册原生「今日」Tab。这是自动让渡机制，不会出现两个侧栏入口。
 
