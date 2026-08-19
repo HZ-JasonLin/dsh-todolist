@@ -1,6 +1,6 @@
-﻿{
+{
   "name": "@hz-jasonlin/dsh-todolist",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "An independent todo board for DeepSeek Harness: list/board/calendar/week/project views, AI tools (todolist / todolist_suggest), and a self-contained storage backend. Registers a top-level Todos tab; registers a right-sidebar Today tab when dsh-better-sidebar is present, otherwise provides a standalone Today sidebar.",
   "keywords": [
     "deepseek",
