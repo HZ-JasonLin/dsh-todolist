@@ -3,16 +3,16 @@
 # This file is the `dsh.bundle.patch` layer of the plugin package: when the
 # plugin is installed through the official CLI —
 #
-#   dsh plugin --profile <name> add dsh-todolist
+#   dsh plugin --profile <name> add @hz-jasonlin/dsh-todolist
 #
 # — the command reconciles `dsh.profile.bundles` against installed packages
-# and, seeing this declaration, appends `dsh-todolist` to the bundle stack.
-# The profile boot then merges THIS patch (a single `insert` of the plugin
-# row) exactly like a manual cordis.patch.yml mount line. No profile file
-# edits needed — one command installs and mounts.
+# and, seeing this declaration, appends `@hz-jasonlin/dsh-todolist` to the
+# bundle stack. The profile boot then merges THIS patch (a single `insert` of
+# the plugin row) exactly like a manual cordis.patch.yml mount line. No
+# profile file edits needed — one command installs and mounts.
 #
 # The loader entry `name` must equal the package.json `name` exactly
 # (client-modules resolves the client bundle's registration id by it).
 - insert:
-    - id: dsh-todolist
-      name: 'dsh-todolist'
+    - id: todolist
+      name: '@hz-jasonlin/dsh-todolist'
