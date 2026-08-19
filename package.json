@@ -2,6 +2,15 @@
   "name": "dsh-todolist",
   "version": "0.1.0",
   "description": "An independent todo board for DeepSeek Harness: list/board/calendar/week/project views, AI tools (todolist / todolist_suggest), and a self-contained storage backend. Registers a top-level Todos tab; registers a right-sidebar Today tab when dsh-better-sidebar is present, otherwise provides a standalone Today sidebar.",
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "todo",
+    "task-management",
+    "productivity"
+  ],
   "private": false,
   "type": "module",
   "main": "lib/index.js",
@@ -10,6 +19,19 @@
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HZ-JasonLin/dsh-todolist.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "node scripts/build.mjs"
   },
