@@ -185,6 +185,13 @@ function shiftDays(key: string, delta: number): string {
   return dateKey(new Date(y, m - 1, d + delta))
 }
 
+/** 两个日期键之间的天数差（to - from）。 */
+function dayDelta(from: string, to: string): number {
+  const [fy, fm, fd] = from.split('-').map(Number)
+  const [ty, tm, td] = to.split('-').map(Number)
+  return Math.round((new Date(ty, tm - 1, td).getTime() - new Date(fy, fm - 1, fd).getTime()) / 86400000)
+}
+
 /** 日期键所在周的周一日期键（周一为一周起点）。 */
 function weekStartOf(key: string): string {
   const [y, m, d] = key.split('-').map(Number)
@@ -242,6 +249,9 @@ interface RangeDraft {
   end: string
   source: 'calendar' | 'week'
 }
+
+/** 拖动源：calendar=月历、week=周视图、today=今日视图（仅排序，无日期落点）。 */
+type DragSource = RangeDraft['source'] | 'today'
 
 interface RangeGesture {
   pointerId: number
@@ -466,6 +476,12 @@ export function TodoView(props: TodoViewProps): JSX.Element {
   const [spanDrop, setSpanDrop] = useState<{ key: string; id: string; position: 'before' | 'after' } | null>(null)
   /** 拖动源 id 的同步镜像：dragover 高频触发，不能依赖异步 state。 */
   const draggingSpanIdRef = useRef<string | null>(null)
+  /** 拖动改日期的落点高亮（日历/周视图：拖到某天空白处改期，拖到任务条上排序）。 */
+  const [spanDateDrop, setSpanDateDrop] = useState<{ day: string; source: RangeDraft['source'] } | null>(null)
+  /** 月历折叠行的行键（该行周一的 dateKey）；展开后显示全部泳道。 */
+  const [expandedRow, setExpandedRow] = useState<string | null>(null)
+  /** 拖动起点锚（任务 id + 所在日期）：跨度任务按落点与锚点的天数差整体平移。 */
+  const dragAnchorRef = useRef<{ id: string; day: string } | null>(null)
   /** 项目看板列顺序：拖动后写入 localStorage，刷新仍保持。 */
   const [projectOrder, setProjectOrder] = useState<string[]>(loadProjectOrder)
   const [draggingProject, setDraggingProject] = useState<string | null>(null)
@@ -475,6 +491,8 @@ export function TodoView(props: TodoViewProps): JSX.Element {
   /** 添加弹窗：开关 + 表单草稿。 */
   const [modalOpen, setModalOpen] = useState(false)
   const [modalEditId, setModalEditId] = useState<string | null>(null)
+  /** 删除二次确认弹窗（在编辑弹窗之上再弹一层，避免连续点击误触）。 */
+  const [confirmOpen, setConfirmOpen] = useState(false)
   const [mContent, setMContent] = useState('')
   const [mProj, setMProj] = useState('')
   const [mWho, setMWho] = useState('')
@@ -531,6 +549,7 @@ export function TodoView(props: TodoViewProps): JSX.Element {
   /** 打开添加弹窗；从日历进入时预填所点日期为结束日期。 */
   const openAddModal = (day = ''): void => {
     setModalEditId(null)
+    setConfirmOpen(false)
     setMContent('')
     setMProj(projectFilter)
     setMWho('')
@@ -547,6 +566,7 @@ export function TodoView(props: TodoViewProps): JSX.Element {
 
   const openEditModal = (item: TodoItem): void => {
     setModalEditId(item.id)
+    setConfirmOpen(false)
     setMContent(item.text)
     setMProj(item.proj?.trim() ?? '')
     setMWho(item.who ?? '')
@@ -584,6 +604,25 @@ export function TodoView(props: TodoViewProps): JSX.Element {
       ? '.me-cal-cell[data-calendar-day]'
       : '.me-week-date-head[data-calendar-day], .me-week-column[data-calendar-day]'
     const candidates = Array.from(document.querySelectorAll<HTMLElement>(selector))
+    for (const candidate of candidates) {
+      const rect = candidate.getBoundingClientRect()
+      if (clientX >= rect.left && clientX < rect.right && clientY >= rect.top && clientY < rect.bottom) {
+        return candidate.dataset.calendarDay ?? null
+      }
+    }
+    return null
+  }
+
+  /** 与 dayAtPoint 相同，但候选限定在指定容器内（拖动改日期的落点解析，
+   *  避免命中共存的其他 TodoView 实例的单元格）。today 视图没有日期落点，恒返回 null。 */
+  const dayAtPointInRoot = (clientX: number, clientY: number, source: DragSource, root: HTMLElement): string | null => {
+    const selector = source === 'calendar'
+      ? '.me-cal-cell[data-calendar-day]'
+      : source === 'week'
+        ? '.me-week-date-head[data-calendar-day], .me-week-column[data-calendar-day]'
+        : ''
+    if (selector === '') return null
+    const candidates = Array.from(root.querySelectorAll<HTMLElement>(selector))
     for (const candidate of candidates) {
       const rect = candidate.getBoundingClientRect()
       if (clientX >= rect.left && clientX < rect.right && clientY >= rect.top && clientY < rect.bottom) {
@@ -691,21 +730,26 @@ export function TodoView(props: TodoViewProps): JSX.Element {
    * During an HTML5 drag the dragged element is excluded from hit testing, so
    * candidates are compared by vertical center distance. For the month grid the
    * row that actually contains the pointer wins, so cross-week drags anchor
-   * inside the row under the cursor instead of a distant row. */
-  const spanAtPoint = (clientX: number, clientY: number, root: HTMLElement | null): HTMLElement | null => {
+   * inside the row under the cursor instead of a distant row. When the nearest
+   * span is farther than maxDistance, returns null — the drop is treated as a
+   * move-to-date instead of a reorder. */
+  const spanAtPoint = (clientX: number, clientY: number, root: HTMLElement | null, maxDistance = 14): HTMLElement | null => {
     if (root === null) return null
     const rootRect = root.getBoundingClientRect()
     if (clientX < rootRect.left || clientX > rootRect.right || clientY < rootRect.top || clientY > rootRect.bottom) return null
     // Month: constrain the candidate set to the week row under the pointer.
-    // Week: the whole column container is the candidate set.
+    // Week: the whole surface is the candidate set.
     let scope: HTMLElement = root
-    if (root.classList.contains('me-cal-span-layer')) {
-      const rows = Array.from(root.parentElement?.querySelectorAll<HTMLElement>('.me-cal-row') ?? [])
-      const hit = rows.find((row) => {
-        const rect = row.getBoundingClientRect()
-        return clientY >= rect.top && clientY < rect.bottom
-      })
-      if (hit !== undefined) scope = hit
+    if (root.classList.contains('me-cal-span-layer') || root.classList.contains('me-cal-row')) {
+      let hitRow: HTMLElement | null = root.classList.contains('me-cal-row') ? root : null
+      if (hitRow === null) {
+        const rows = Array.from(root.parentElement?.querySelectorAll<HTMLElement>('.me-cal-row') ?? [])
+        hitRow = rows.find((row) => {
+          const rect = row.getBoundingClientRect()
+          return clientY >= rect.top && clientY < rect.bottom
+        }) ?? null
+      }
+      if (hitRow !== null) scope = hitRow
     }
     const spans = Array.from(scope.querySelectorAll<HTMLElement>('.me-calendar-span, .me-week-event'))
     // Prefer spans whose column band covers the pointer x; fall back to vertical center.
@@ -724,12 +768,13 @@ export function TodoView(props: TodoViewProps): JSX.Element {
         best = span
       }
     }
+    if (bestDist > maxDistance) return null
     return best
   }
 
   /** Resolve a drop against the closest span under the pointer. */
-  const resolveSpanDrop = (event: DragEvent<HTMLElement>, root: HTMLElement | null): { targetId: string; segmentKey: string; position: 'before' | 'after' } | null => {
-    const span = spanAtPoint(event.clientX, event.clientY, root)
+  const resolveSpanDrop = (event: DragEvent<HTMLElement>, root: HTMLElement | null, maxDistance = 14): { targetId: string; segmentKey: string; position: 'before' | 'after' } | null => {
+    const span = spanAtPoint(event.clientX, event.clientY, root, maxDistance)
     if (span === null) return null
     const targetId = span.dataset.todoId ?? ''
     const segmentKey = span.dataset.segmentKey ?? ''
@@ -739,52 +784,167 @@ export function TodoView(props: TodoViewProps): JSX.Element {
     return { targetId, segmentKey, position }
   }
 
-  const startSpanDrag = (event: DragEvent<HTMLButtonElement>, item: TodoItem): void => {
+  const startSpanDrag = (event: DragEvent<HTMLButtonElement>, item: TodoItem, anchorDay: string): void => {
     if (item.id === RANGE_DRAFT_ID) {
       event.preventDefault()
       return
     }
     event.dataTransfer.effectAllowed = 'move'
     event.dataTransfer.setData('text/plain', item.id)
+    // 自定义紧凑拖影：避免浏览器默认截取整张卡片（侧边栏里会变成一大片灰色半透明块）。
+    const ghost = document.createElement('div')
+    ghost.textContent = item.text.split('\n')[0]
+    ghost.style.cssText = [
+      'position: fixed', 'top: -1000px', 'left: 0',
+      'max-width: 240px', 'padding: 4px 10px', 'border-radius: 6px',
+      'background: #2563eb', 'color: #ffffff',
+      'font: 600 12px/1.5 system-ui, sans-serif',
+      'white-space: nowrap', 'overflow: hidden', 'text-overflow: ellipsis',
+      'box-shadow: 0 2px 10px rgba(37, 99, 235, 0.4)',
+    ].join(';')
+    document.body.appendChild(ghost)
+    event.dataTransfer.setDragImage(ghost, 10, 12)
+    window.setTimeout(() => ghost.remove(), 0)
     draggingSpanIdRef.current = item.id
+    dragAnchorRef.current = { id: item.id, day: anchorDay }
     setDraggingSpanId(item.id)
     setSpanDrop(null)
+    setSpanDateDrop(null)
   }
 
-  /** Container-level dragover: the source row/column is the drop zone, and the
-   * closest span under the pointer decides the insertion anchor. */
-  const overSpanContainer = (event: DragEvent<HTMLDivElement | HTMLElement>, source: 'calendar' | 'week'): void => {
+  /** Container-level dragover: dropping onto another task bar = 排序；onto
+   * 空白日期区域 = 改日期（落点格高亮）。 */
+  const overSpanContainer = (event: DragEvent<HTMLDivElement | HTMLElement>, source: DragSource): void => {
     const sourceId = draggingSpanIdRef.current ?? draggingSpanId ?? event.dataTransfer.getData('text/plain')
     if (sourceId === '' || busy) return
     event.preventDefault()
+    // 阻止冒泡到宿主（better-sidebar 面板等）——避免宿主把任务拖动当成
+    // 它的标签拖放，弹出 VSCode 式分栏虚线框/灰色落区遮罩。
+    event.stopPropagation()
     event.dataTransfer.dropEffect = 'move'
-    const hit = resolveSpanDrop(event, event.currentTarget)
-    if (hit === null) {
-      setSpanDrop((current) => (current === null || current.id !== sourceId ? current : null))
+    const hit = resolveSpanDrop(event, event.currentTarget, source === 'calendar' ? 12 : 18)
+    if (hit !== null && hit.targetId !== sourceId) {
+      setSpanDrop((current) => (
+        current !== null && current.key === hit.segmentKey && current.position === hit.position ? current : { key: hit.segmentKey, id: hit.targetId, position: hit.position }
+      ))
+      setSpanDateDrop(null)
       return
     }
-    if (hit.targetId === sourceId) return
-    setSpanDrop((current) => (
-      current !== null && current.key === hit.segmentKey && current.position === hit.position ? current : { key: hit.segmentKey, id: hit.targetId, position: hit.position }
+    setSpanDrop(null)
+    if (hit !== null && hit.targetId === sourceId) {
+      setSpanDateDrop(null)
+      return
+    }
+    if (source === 'today') {
+      setSpanDateDrop(null)
+      return
+    }
+    const day = dayAtPointInRoot(event.clientX, event.clientY, source, event.currentTarget)
+    setSpanDateDrop((current) => (
+      current !== null && current.day === day && current.source === source ? current : (day !== null ? { day, source } : null)
     ))
   }
 
-  /** Container-level drop: reorder against the closest span under the pointer. */
-  const dropSpanContainer = (event: DragEvent<HTMLDivElement | HTMLElement>): void => {
+  /** Container-level drop: 贴近任务条 = 排序；空白日期 = 改日期；today 视图整列排序。 */
+  const dropSpanContainer = (event: DragEvent<HTMLDivElement | HTMLElement>, source: DragSource): void => {
     event.preventDefault()
+    event.stopPropagation()
     const sourceId = draggingSpanIdRef.current ?? draggingSpanId ?? event.dataTransfer.getData('text/plain')
-    const hit = resolveSpanDrop(event, event.currentTarget)
+    const hit = resolveSpanDrop(event, event.currentTarget, source === 'calendar' ? 12 : 18)
+    const day = source === 'today' ? null : dayAtPointInRoot(event.clientX, event.clientY, source, event.currentTarget)
+    const anchorDay = dragAnchorRef.current?.day
     draggingSpanIdRef.current = null
+    dragAnchorRef.current = null
     setDraggingSpanId(null)
     setSpanDrop(null)
-    if (sourceId === '' || hit === null || hit.targetId === sourceId || busy) return
+    setSpanDateDrop(null)
+    if (sourceId === '' || busy) return
+    // 拖动松手后浏览器偶发补发 click：抑制一次，避免误开编辑弹窗。
+    suppressCalendarClickRef.current = true
+    window.setTimeout(() => { suppressCalendarClickRef.current = false }, 0)
+    if (hit !== null && hit.targetId !== sourceId) {
+      if (source === 'today') {
+        // 今日视图整列排序：以当前显示顺序为底、应用本次移动后得到目标序列，
+        // 再依次把每项移到前一项之后（两两 reorder，归纳保证相对顺序正确）。
+        // 这样刷新后顺序保持，且不依赖服务端版本（无需应用重启）。
+        const orderedIds = todayList.map((entry) => entry.id)
+        const srcIndex = orderedIds.indexOf(sourceId)
+        if (srcIndex !== -1) orderedIds.splice(srcIndex, 1)
+        const targetIndex = orderedIds.indexOf(hit.targetId)
+        if (targetIndex === -1) return
+        orderedIds.splice(targetIndex + (hit.position === 'after' ? 1 : 0), 0, sourceId)
+        const moves: Array<{ id: string; targetId: string; position: 'after' }> = []
+        for (let i = 1; i < orderedIds.length; i += 1) {
+          moves.push({ id: orderedIds[i], targetId: orderedIds[i - 1], position: 'after' })
+        }
+        if (moves.length === 0) return
+        setBusy(true)
+        const applyMoves = async (): Promise<void> => {
+          for (const move of moves) {
+            await api<{ ok: boolean }>('/api/todo', {
+              method: 'POST',
+              body: JSON.stringify({ sessionId, action: 'reorder', id: move.id, targetId: move.targetId, position: move.position }),
+            })
+          }
+        }
+        void applyMoves().then(() => {
+          notifyChanged()
+          flash(t('todo.updated'))
+        }).catch((error: Error) => {
+          setNotice({ kind: 'error', text: error.message })
+        }).finally(() => setBusy(false))
+        return
+      }
+      setBusy(true)
+      void api<{ ok: boolean }>('/api/todo', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId, action: 'reorder', id: sourceId, targetId: hit.targetId, position: hit.position }),
+      }).then(() => {
+        notifyChanged()
+        flash(t('todo.updated'))
+      }).catch((error: Error) => {
+        setNotice({ kind: 'error', text: error.message })
+      }).finally(() => setBusy(false))
+      return
+    }
+    if (day === null) return
+    const item = (items ?? []).find((entry) => entry.id === sourceId)
+    if (item === undefined) return
+    moveItemToDay(item, day, anchorDay)
+  }
+
+  /** 拖动改日期：单日任务落点即新日期；跨度任务按锚点→落点天数差整体平移。 */
+  const moveItemToDay = (item: TodoItem, targetDay: string, anchor: string | undefined): void => {
+    if (item.repeat !== null) {
+      flash(t('todo.repeat.noDateDrag'))
+      return
+    }
+    // 已完成任务按完成日展示，拖动改日期不会产生可见移动，明确提示而非静默失败。
+    if (DONE_STATUSES.has(item.status)) {
+      flash(t('todo.done.noDateDrag'))
+      return
+    }
+    let startPatch: string | undefined
+    let duePatch: string | undefined
+    if (item.start !== null && item.due !== null) {
+      const delta = anchor !== undefined ? dayDelta(anchor, targetDay) : 0
+      startPatch = shiftDays(item.start, delta)
+      duePatch = shiftDays(item.due, delta)
+    } else if (item.due !== null) {
+      duePatch = targetDay
+    } else if (item.start !== null) {
+      startPatch = targetDay
+    } else {
+      return
+    }
+    if ((startPatch ?? null) === item.start && (duePatch ?? null) === item.due) return
     setBusy(true)
     void api<{ ok: boolean }>('/api/todo', {
       method: 'POST',
-      body: JSON.stringify({ sessionId, action: 'reorder', id: sourceId, targetId: hit.targetId, position: hit.position }),
+      body: JSON.stringify({ sessionId, action: 'update', id: item.id, start: startPatch, due: duePatch }),
     }).then(() => {
       notifyChanged()
-      flash(t('todo.updated'))
+      flash(`${t('todo.movedTo')} ${fmtDate(targetDay)}`)
     }).catch((error: Error) => {
       setNotice({ kind: 'error', text: error.message })
     }).finally(() => setBusy(false))
@@ -794,8 +954,10 @@ export function TodoView(props: TodoViewProps): JSX.Element {
 
   const endSpanDrag = (): void => {
     draggingSpanIdRef.current = null
+    dragAnchorRef.current = null
     setDraggingSpanId(null)
     setSpanDrop(null)
+    setSpanDateDrop(null)
   }
 
   useEffect(() => {
@@ -807,9 +969,48 @@ export function TodoView(props: TodoViewProps): JSX.Element {
     }
   }, [])
 
+  /** Esc 关闭弹窗：先关删除确认弹窗，再退日期选择面板，最后关整个编辑弹窗。 */
+  useEffect(() => {
+    if (!modalOpen) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      if (confirmOpen) {
+        setConfirmOpen(false)
+        return
+      }
+      if (mDateTarget !== null) {
+        setMDateTarget(null)
+        return
+      }
+      setModalOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [modalOpen, confirmOpen, mDateTarget])
+
+  /** 任务拖动期间：把拖放事件私有化到本插件面板内。面板之外的 dragover/drop
+   * （better-sidebar 分栏落区、宿主文件拖放遮罩等）在捕获阶段直接拦截，
+   * 宿主不会把任务拖动误判成自己的拖放手势。 */
+  useEffect(() => {
+    const shieldDrag = (event: Event): void => {
+      if (draggingSpanIdRef.current === null) return
+      const target = event.target as HTMLElement | null
+      if (target === null || target.closest('.me-panel') !== null) return
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    window.addEventListener('dragover', shieldDrag, true)
+    window.addEventListener('drop', shieldDrag, true)
+    return () => {
+      window.removeEventListener('dragover', shieldDrag, true)
+      window.removeEventListener('drop', shieldDrag, true)
+    }
+  }, [])
+
   useEffect(() => {
     cancelRangeGesture()
     endSpanDrag()
+    setExpandedRow(null)
   }, [viewMode])
 
   /** 弹窗提交新增或编辑；两种动作共用同一套字段。 */
@@ -885,16 +1086,19 @@ export function TodoView(props: TodoViewProps): JSX.Element {
     }).finally(() => setBusy(false))
   }
 
-  /** 删除（确认后；列表与看板共用）。 */
-  const removeTodo = (item: TodoItem): void => {
-    if (busy) return
-    const snippet = item.text.split('\n')[0].slice(0, 40)
-    if (!window.confirm(t('todo.deleteConfirm', { snippet }))) return
+  /** 确认弹窗内真正执行删除；成功后关闭确认弹窗与编辑弹窗。 */
+  const confirmDeleteNow = (): void => {
+    if (modalEditId === null || busy) return
+    const item = (items ?? []).find((entry) => entry.id === modalEditId)
+    if (item === undefined) return
     setBusy(true)
     void api<{ ok: boolean }>('/api/todo', {
       method: 'POST',
       body: JSON.stringify({ sessionId, action: 'remove', id: item.id }),
     }).then(() => {
+      setConfirmOpen(false)
+      setModalOpen(false)
+      setModalEditId(null)
       notifyChanged()
       flash(t('todo.deleted'))
     }).catch((error: Error) => {
@@ -982,6 +1186,46 @@ export function TodoView(props: TodoViewProps): JSX.Element {
     return true
   })
 
+  /** 今日视图任务集（顶部与侧边栏共用）。 */
+  const todaySource = timeVisible.filter((item) => {
+    if (item.status === 'done') return item.doneAt?.slice(0, 10) === today
+    if (item.status === 'cancelled') return false
+    if (item.repeat !== null) return repeatDayMatches(item, new Date())
+    if (item.due !== null && item.due < today) return true
+    if (item.due === today) return true
+    if (item.start !== null && item.due !== null) return item.start <= today && today <= item.due
+    if (item.start === today) return true
+    return false
+  })
+  /**
+   * 今日视图排序：默认「智能顺序」（逾期 → 今日到期 → 周期 → 进行中），
+   * 用户手动拖动排序过一次后（calendarOrder 不再等于创建顺序），
+   * 改为完全按用户顺序展示并持久保存。
+   */
+  const todayManualOrder = (() => {
+    const byTime = [...todaySource].sort((a, b) => String(a.time).localeCompare(String(b.time)) || a.id.localeCompare(b.id))
+    return !byTime.every((item, index) => (
+      index === 0 || (item.calendarOrder ?? Number.MAX_SAFE_INTEGER) >= (byTime[index - 1].calendarOrder ?? Number.MAX_SAFE_INTEGER)
+    ))
+  })()
+  const todayRank = (item: TodoItem): number => {
+    if (item.status === 'done') return 4
+    if (item.due !== null && item.due < today) return 0
+    if (item.due === today) return 1
+    if (item.repeat !== null) return 2
+    return 3
+  }
+  const todayList = [...todaySource].sort((a, b) => {
+    if (!todayManualOrder) {
+      const r = todayRank(a) - todayRank(b)
+      if (r !== 0) return r
+    }
+    const byOrder = compareCalendarItems(a, b)
+    if (byOrder !== 0) return byOrder
+    return String(a.due ?? '').localeCompare(String(b.due ?? ''))
+  })
+  const todayOverdueCount = todayList.filter((item) => item.status !== 'done' && item.due !== null && item.due < today).length
+
   /** 周期文案（含定点：每周·周二 / 每月·15号）。 */
   const repeatText = (item: TodoItem): string => {
     if (item.repeat === 'weekly') return item.on !== null ? `${t('todo.repeat.weekly')}·${t(`todo.weekday.${item.on}`)}` : t('todo.repeat.weekly')
@@ -1027,19 +1271,7 @@ export function TodoView(props: TodoViewProps): JSX.Element {
     )
   }
 
-  /** 渲染编辑/删除操作；完成/恢复统一由卡片左侧勾选框承担。 */
-  const renderActions = (item: TodoItem): JSX.Element => (
-    <span className="me-item-actions">
-      <button type="button" className="me-btn" disabled={busy} onClick={() => openEditModal(item)}>
-        {t('todo.edit')}
-      </button>
-      <button type="button" className="me-btn me-btn-danger" disabled={busy} onClick={() => removeTodo(item)}>
-        {t('memoryTab.delete')}
-      </button>
-    </span>
-  )
-
-  /** 看板单张卡片。 */
+  /** 看板单张卡片：整卡点击直接进入编辑（勾选框除外）。 */
   const renderCard = (item: TodoItem): JSX.Element => {
     const done = DONE_STATUSES.has(item.status)
     // 标题取首行，过长截断；完整内容在编辑或 title 悬停可见
@@ -1049,6 +1281,7 @@ export function TodoView(props: TodoViewProps): JSX.Element {
       <article
         key={item.id}
         className={`me-todo-card${done ? ' me-todo-card--done' : ''}`}
+        onClick={() => openEditModal(item)}
       >
         {/* 日事清式：左侧项目色竖条 */}
         <span className="me-todo-card-bar" style={{ background: color }} />
@@ -1059,7 +1292,10 @@ export function TodoView(props: TodoViewProps): JSX.Element {
               type="button"
               className={`me-todo-check${done ? ' me-todo-check--done' : ''}`}
               disabled={busy}
-              onClick={() => toggleDone(item)}
+              onClick={(event) => {
+                event.stopPropagation()
+                toggleDone(item)
+              }}
               title={done ? t('todo.undone') : t('todo.done')}
             >
               {done ? '✓' : ''}
@@ -1078,7 +1314,6 @@ export function TodoView(props: TodoViewProps): JSX.Element {
           </div>
           <div className="me-todo-card-foot">
             <span className="me-item-time">{item.time}</span>
-            {renderActions(item)}
           </div>
         </div>
       </article>
@@ -1118,20 +1353,34 @@ export function TodoView(props: TodoViewProps): JSX.Element {
             <button type="button" className="me-btn me-icon-btn" title={t('todo.calendar.prev')} onClick={() => {
               setCalendarAnchor(`${shiftMonth(calMonth, -1)}-01`)
               setSelectedDay(null)
+              setExpandedRow(null)
             }}>‹</button>
             <button type="button" className="me-btn me-icon-btn" title={t('todo.calendar.next')} onClick={() => {
               setCalendarAnchor(`${shiftMonth(calMonth, 1)}-01`)
               setSelectedDay(null)
+              setExpandedRow(null)
             }}>›</button>
             <button type="button" className="me-btn" onClick={() => {
               setCalendarAnchor(today)
               setSelectedDay(today)
+              setExpandedRow(null)
             }}>{t('todo.calendar.today')}</button>
           </div>
           <span className="me-cal-title">{curY}年{curM}月</span>
         </div>
         <div className="me-calendar-scroll">
-          <div className="me-calendar-surface">
+          <div
+            className="me-calendar-surface"
+            onDragOver={(event) => {
+              // 行间空隙等区域：阻止冒泡到宿主，并防止误放文件触发浏览器跳转
+              event.preventDefault()
+              event.stopPropagation()
+            }}
+            onDrop={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+            }}
+          >
             <div className="me-cal-weekdays">
               {['一', '二', '三', '四', '五', '六', '日'].map((weekday) => (
                 <span key={weekday} className="me-cal-weekday">{weekday}</span>
@@ -1139,19 +1388,35 @@ export function TodoView(props: TodoViewProps): JSX.Element {
             </div>
             {weeks.map((week, weekIndex) => {
               const segments = spanRows[weekIndex] ?? []
-              // 折叠超出可见泳道的段：整行最多 MAX_MONTH_LANES 条泳道；
-              // 但某条跨列长条若从更高泳道开始，仍保留（该行高由可见段决定）。
-              const visibleSegments = segments.filter((segment) => segment.lane < MAX_MONTH_LANES)
-              const hiddenSegments = segments.filter((segment) => segment.lane >= MAX_MONTH_LANES)
+              const rowKey = dateKey(week[0])
+              const isExpanded = expandedRow === rowKey
+              const laneLimit = isExpanded ? Number.MAX_SAFE_INTEGER : MAX_MONTH_LANES
+              // 折叠统计始终基于固定上限，保证「+N / 收起」入口位置不随展开态漂移。
+              const overflowSegments = segments.filter((segment) => segment.lane >= MAX_MONTH_LANES)
+              const visibleSegments = segments.filter((segment) => segment.lane < laneLimit)
+              const hiddenSegments = segments.filter((segment) => segment.lane >= laneLimit)
               const laneCount = visibleSegments.reduce((max, segment) => Math.max(max, segment.lane + 1), 0)
-              const rowStyle = { '--me-span-lanes': Math.max(laneCount, hiddenSegments.length > 0 ? 1 : 0) } as CSSProperties
               // 折叠入口固定指向这一行最早的折叠日期，避免按跨度覆盖数量
-              // 把 17 日的隐藏任务错误指向后续日期。
-              const hiddenDay = hiddenSegments.length > 0
-                ? dateKey(grid[Math.min(...hiddenSegments.map((segment) => segment.startIndex))])
+              // 把 17 日的隐藏任务错误指向后续日期。列号必须取「行内列」（% 7），
+              // 直接用全月网格下标会把 +N 甩到行外最右侧。
+              const hiddenDay = overflowSegments.length > 0
+                ? dateKey(grid[Math.min(...overflowSegments.map((segment) => segment.startIndex))])
                 : null
+              const hiddenCol = overflowSegments.length > 0
+                ? Math.min(...overflowSegments.map((segment) => segment.startIndex)) % 7
+                : -1
+              // 「+N / 收起」独占一行轨道，避免与最后一条可见泳道重叠。
+              const rowStyle = {
+                '--me-span-lanes': Math.max(laneCount, hiddenSegments.length > 0 ? 1 : 0) + (isExpanded || hiddenSegments.length > 0 ? 1 : 0),
+              } as CSSProperties
               return (
-                <div key={dateKey(week[0])} className="me-cal-row" style={rowStyle}>
+                <div
+                  key={rowKey}
+                  className="me-cal-row"
+                  style={rowStyle}
+                  onDragOver={(event) => overSpanContainer(event, 'calendar')}
+                  onDrop={(event) => dropSpanContainer(event, 'calendar')}
+                >
                   <div className="me-cal-days">
                     {week.map((day) => {
                       const key = dateKey(day)
@@ -1168,6 +1433,7 @@ export function TodoView(props: TodoViewProps): JSX.Element {
                             key === selectedDay ? 'me-cal-cell--selected' : '',
                             overdue ? 'me-cal-cell--overdue' : '',
                             rangeDraft?.source === 'calendar' && key >= rangeDraft.start && key <= rangeDraft.end ? 'me-cal-cell--range-drag' : '',
+                            spanDateDrop !== null && spanDateDrop.source === 'calendar' && spanDateDrop.day === key ? 'me-cal-cell--drop-day' : '',
                           ].filter(Boolean).join(' ')}
                           data-calendar-day={key}
                           onPointerDown={(event) => beginRangeGesture(key, 'calendar', event)}
@@ -1196,11 +1462,7 @@ export function TodoView(props: TodoViewProps): JSX.Element {
                       )
                     })}
                   </div>
-                  <div
-                    className="me-cal-span-layer"
-                    onDragOver={(event) => overSpanContainer(event, 'calendar')}
-                    onDrop={dropSpanContainer}
-                  >
+                  <div className="me-cal-span-layer">
                     {visibleSegments.map((segment) => {
                       const segmentKey = `${segment.occurrenceKey}-${segment.startIndex}`
                       const item = segment.item
@@ -1239,19 +1501,11 @@ export function TodoView(props: TodoViewProps): JSX.Element {
                           data-segment-key={segmentKey}
                           title={`${item.text}${schedule !== '' ? `\n${schedule}` : ''}`}
                           draggable={segment.item.id !== RANGE_DRAFT_ID}
-                          onDragStart={(event) => startSpanDrag(event, segment.item)}
+                          onDragStart={(event) => startSpanDrag(event, segment.item, dateKey(grid[segment.startIndex]))}
                           onDragEnd={endSpanDrag}
-                          onClick={(event) => {
-                            if (segment.item.id === RANGE_DRAFT_ID) return
-                            const row = event.currentTarget.closest<HTMLElement>('.me-cal-row')
-                            const cells = row === null
-                              ? []
-                              : Array.from(row.querySelectorAll<HTMLElement>('.me-cal-cell[data-calendar-day]'))
-                            const clicked = cells.find((cell) => {
-                              const rect = cell.getBoundingClientRect()
-                              return event.clientX >= rect.left && event.clientX < rect.right
-                            })
-                            selectCalendarDay(clicked?.dataset.calendarDay ?? dateKey(grid[segment.startIndex]))
+                          onClick={() => {
+                            if (segment.item.id === RANGE_DRAFT_ID || suppressCalendarClickRef.current) return
+                            openEditModal(segment.item)
                           }}
                         >
                           {segment.continuesBefore ? '‹ ' : ''}{segment.item.text.split('\n')[0]}{segment.continuesAfter ? ' ›' : ''}
@@ -1261,18 +1515,33 @@ export function TodoView(props: TodoViewProps): JSX.Element {
                         </button>
                       )
                     })}
-                    {hiddenSegments.length > 0 && hiddenDay !== null && (
+                    {hiddenSegments.length > 0 && hiddenDay !== null && hiddenCol >= 0 && (
                       <button
                         type="button"
                         className="me-calendar-more"
                         aria-label={`展开${hiddenDay}的${hiddenSegments.length}项待办`}
+                        style={{ gridColumn: `${hiddenCol + 1}`, gridRow: laneCount + 1 }}
                         onPointerDown={(event) => event.stopPropagation()}
                         onClick={(event) => {
                           event.preventDefault()
                           event.stopPropagation()
-                          selectCalendarDay(hiddenDay)
+                          setExpandedRow(rowKey)
                         }}
                       >+{hiddenSegments.length}</button>
+                    )}
+                    {isExpanded && overflowSegments.length > 0 && hiddenDay !== null && hiddenCol >= 0 && (
+                      <button
+                        type="button"
+                        className="me-calendar-more"
+                        aria-label={t('todo.calendar.collapse')}
+                        style={{ gridColumn: `${hiddenCol + 1}`, gridRow: laneCount + 1 }}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                          event.preventDefault()
+                          event.stopPropagation()
+                          setExpandedRow(null)
+                        }}
+                      >{t('todo.calendar.collapse')}</button>
                     )}
                   </div>
                 </div>
@@ -1384,7 +1653,11 @@ export function TodoView(props: TodoViewProps): JSX.Element {
           <span className="me-cal-title">{weekLabel}</span>
         </div>
         <div className="me-calendar-scroll">
-          <div className="me-week-surface">
+          <div
+            className="me-week-surface"
+            onDragOver={(event) => overSpanContainer(event, 'week')}
+            onDrop={(event) => dropSpanContainer(event, 'week')}
+          >
             <div className="me-week-headers">
               {days.map((date, index) => {
                 const key = dateKey(date)
@@ -1407,18 +1680,19 @@ export function TodoView(props: TodoViewProps): JSX.Element {
                 )
               })}
             </div>
-            <div
-              className="me-week-columns"
-              onDragOver={(event) => overSpanContainer(event, 'week')}
-              onDrop={dropSpanContainer}
-            >
+            <div className="me-week-columns">
               {days.map((date) => {
                 const key = dateKey(date)
                 const cards = weekCards(key)
                 return (
                   <section
                     key={key}
-                    className={`me-week-column${key === today ? ' me-week-column--today' : ''}${rangeDraft?.source === 'week' && key >= rangeDraft.start && key <= rangeDraft.end ? ' me-cal-cell--range-drag' : ''}`}
+                    className={[
+                      'me-week-column',
+                      key === today ? 'me-week-column--today' : '',
+                      rangeDraft?.source === 'week' && key >= rangeDraft.start && key <= rangeDraft.end ? 'me-cal-cell--range-drag' : '',
+                      spanDateDrop !== null && spanDateDrop.source === 'week' && spanDateDrop.day === key ? 'me-week-column--drop-day' : '',
+                    ].filter(Boolean).join(' ')}
                     data-calendar-day={key}
                     onPointerDown={(event) => beginRangeGesture(key, 'week', event)}
                     onPointerMove={moveRangeGesture}
@@ -1458,10 +1732,10 @@ export function TodoView(props: TodoViewProps): JSX.Element {
                           data-segment-key={cardKey}
                           title={item.text}
                           draggable={item.id !== RANGE_DRAFT_ID}
-                          onDragStart={(event) => startSpanDrag(event, item)}
+                          onDragStart={(event) => startSpanDrag(event, item, key)}
                           onDragEnd={endSpanDrag}
                           onClick={() => {
-                            if (item.id !== RANGE_DRAFT_ID) selectCalendarDay(key)
+                            if (item.id !== RANGE_DRAFT_ID && !suppressCalendarClickRef.current) openEditModal(item)
                           }}
                         >
                           <span className="me-cal-event-dot" />
@@ -1642,7 +1916,11 @@ export function TodoView(props: TodoViewProps): JSX.Element {
           const done = DONE_STATUSES.has(item.status)
           const overdue = item.due !== null && item.due < today && !done
           return (
-            <li key={item.id} className={`me-item me-todo-item me-todo-item--list${done ? ' me-todo-item--done' : ''}`}>
+            <li
+              key={item.id}
+              className={`me-item me-todo-item me-todo-item--list${done ? ' me-todo-item--done' : ''}`}
+              onClick={() => openEditModal(item)}
+            >
               <span
                 className="me-todo-item-color"
                 style={{ '--me-task-color': taskColor(item) } as CSSProperties}
@@ -1654,7 +1932,10 @@ export function TodoView(props: TodoViewProps): JSX.Element {
                     type="button"
                     className={`me-todo-check${done ? ' me-todo-check--done' : ''}`}
                     disabled={busy}
-                    onClick={() => toggleDone(item)}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      toggleDone(item)
+                    }}
                     title={done ? t('todo.undone') : t('todo.done')}
                   >
                     {done ? '✓' : ''}
@@ -1671,7 +1952,6 @@ export function TodoView(props: TodoViewProps): JSX.Element {
                 <div className="me-item-meta">
                   {renderMetaBadges(item, { showQuad: true })}
                   <span className="me-item-time">{item.time}</span>
-                  {renderActions(item)}
                 </div>
               </div>
             </li>
@@ -1683,39 +1963,23 @@ export function TodoView(props: TodoViewProps): JSX.Element {
 
   /** 今日视图：今天要处理的任务（逾期 + 今天到期 + 今天周期 + 长期任务进行中）。 */
   const renderToday = (): JSX.Element => {
-    const nowDate = new Date()
-    const todayList = timeVisible.filter((item) => {
-      if (item.status === 'done') return item.doneAt?.slice(0, 10) === today
-      if (item.status === 'cancelled') return false
-      if (item.repeat !== null) return repeatDayMatches(item, nowDate)
-      if (item.due !== null && item.due < today) return true
-      if (item.due === today) return true
-      if (item.start !== null && item.due !== null) return item.start <= today && today <= item.due
-      if (item.start === today) return true
-      return false
-    })
-    const rank = (item: TodoItem): number => {
-      if (item.status === 'done') return 4
-      if (item.due !== null && item.due < today) return 0
-      if (item.due === today) return 1
-      if (item.repeat !== null) return 2
-      return 3
-    }
-    todayList.sort((a, b) => {
-      const r = rank(a) - rank(b)
-      if (r !== 0) return r
-      const byOrder = compareCalendarItems(a, b)
-      if (byOrder !== 0) return byOrder
-      return String(a.due ?? '').localeCompare(String(b.due ?? ''))
-    })
-    const overdueCount = todayList.filter((item) => item.status !== 'done' && item.due !== null && item.due < today).length
-
     return (
-      <div className={`me-today${isTodayOnly ? ' me-today--sidebar' : ' me-today--full'}`}>
+      <div
+        className={`me-today${isTodayOnly ? ' me-today--sidebar' : ' me-today--full'}`}
+        onDragOver={(event) => {
+          // 屏蔽宿主（better-sidebar 面板）对任何拖动弹出的分栏落区遮罩
+          event.preventDefault()
+          event.stopPropagation()
+        }}
+        onDrop={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+        }}
+      >
         <div className="me-today-head">
           <span className="me-today-title">{t('todo.view.today')}</span>
           <span className="me-today-date">{today}</span>
-          {overdueCount > 0 && <span className="me-today-overdue">{t('todo.overdue')} {overdueCount}</span>}
+          {todayOverdueCount > 0 && <span className="me-today-overdue">{t('todo.overdue')} {todayOverdueCount}</span>}
           {isTodayOnly && (
             <button type="button" className="me-btn me-btn-primary me-add-btn" onClick={() => openAddWithDay(today)}>
               {t('todo.addNew')}
@@ -1725,21 +1989,43 @@ export function TodoView(props: TodoViewProps): JSX.Element {
         {todayList.length === 0 ? (
           <p className="me-empty">{t('todo.today.empty')}</p>
         ) : (
-          <div className="me-today-list">
+          <div
+            className="me-today-list"
+            onDragOver={(event) => overSpanContainer(event, 'today')}
+            onDrop={(event) => dropSpanContainer(event, 'today')}
+          >
             {todayList.map((item) => {
               const done = DONE_STATUSES.has(item.status)
               return (
                 <article
                   key={item.id}
-                  className={`me-week-event me-week-event--today${done ? ' me-week-event--done' : ''}`}
+                  className={[
+                    'me-week-event',
+                    'me-week-event--today',
+                    done ? 'me-week-event--done' : '',
+                    draggingSpanId === item.id ? 'me-week-event--dragging' : '',
+                    spanDrop?.key === `today-${item.id}` ? `me-calendar-span--drop-${spanDrop.position}` : '',
+                  ].filter(Boolean).join(' ')}
                   style={{ '--me-week-accent': taskColor(item) } as CSSProperties}
+                  data-todo-id={item.id}
+                  data-segment-key={`today-${item.id}`}
+                  title={t('todo.dragReorderHint')}
+                  draggable
+                  onDragStart={(event) => startSpanDrag(event, item, today)}
+                  onDragEnd={endSpanDrag}
+                  onClick={() => {
+                    if (!suppressCalendarClickRef.current) openEditModal(item)
+                  }}
                 >
                   <>
                       <button
                         type="button"
                         className={`me-todo-check${done ? ' me-todo-check--done' : ''}`}
                         disabled={busy}
-                        onClick={() => toggleDone(item)}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          toggleDone(item)
+                        }}
                         title={done ? t('todo.undone') : t('todo.done')}
                       >
                         {done ? '✓' : ''}
@@ -1756,18 +2042,6 @@ export function TodoView(props: TodoViewProps): JSX.Element {
                         {renderMetaBadges(item, { todayCompact: true })}
                         <span className="me-badge me-badge-due">时间 {item.due ?? item.start ?? '未设置'}</span>
                       </span>
-                      <div className="me-week-event-foot">
-                        {!isTodayOnly && (
-                          <span className="me-week-event-actions">
-                            <button type="button" className="me-btn" disabled={busy} onClick={() => openEditModal(item)}>
-                              {t('todo.edit')}
-                            </button>
-                            <button type="button" className="me-btn me-btn-danger" disabled={busy} onClick={() => removeTodo(item)}>
-                              {t('memoryTab.delete')}
-                            </button>
-                          </span>
-                        )}
-                      </div>
                     </>
                 </article>
               )
@@ -1779,7 +2053,7 @@ export function TodoView(props: TodoViewProps): JSX.Element {
   }
 
   return (
-    <div className="me-panel">
+    <div className={`me-panel${rangeDraft !== null ? ' me-panel--range-dragging' : ''}`}>
       {notice !== null && (
         <div className={`me-notice me-notice-${notice.kind}`}>{notice.text}</div>
       )}
@@ -2082,20 +2356,53 @@ export function TodoView(props: TodoViewProps): JSX.Element {
               )}
             </div>
             <div className="me-modal-foot">
-              <button
-                type="button"
-                className="me-btn"
-                onClick={() => setModalOpen(false)}
-              >
-                {t('todo.cancel')}
-              </button>
+              <span className="me-modal-foot-spacer" />
+              {modalEditId !== null && (
+                <button
+                  type="button"
+                  className="me-btn me-btn-danger"
+                  disabled={busy}
+                  onClick={() => setConfirmOpen(true)}
+                >
+                  {t('memoryTab.delete')}
+                </button>
+              )}
               <button
                 type="button"
                 className="me-btn me-btn-primary"
                 disabled={busy || mContent.trim() === ''}
                 onClick={submitModal}
               >
-                {t('todo.add')}
+                {modalEditId === null ? t('todo.add') : t('todo.save')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* 删除二次确认弹窗：编辑弹窗之上再弹一层，明确避免连续点击误触 */}
+      {modalOpen && confirmOpen && (
+        <div className="me-modal me-modal-confirm" onClick={() => setConfirmOpen(false)}>
+          <div
+            className="me-modal-box me-modal-box-confirm"
+            role="alertdialog"
+            aria-label={t('todo.deleteConfirmTitle')}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h4 className="me-modal-title">{t('todo.deleteConfirmTitle')}</h4>
+            <p className="me-modal-confirm-text">
+              {t('todo.deleteConfirmText')}
+              {(() => {
+                const item = (items ?? []).find((entry) => entry.id === modalEditId)
+                return <strong>{item === undefined ? '' : `「${item.text.split('\n')[0].slice(0, 40)}」`}</strong>
+              })()}
+            </p>
+            <div className="me-modal-foot">
+              <span className="me-modal-foot-spacer" />
+              <button type="button" className="me-btn" onClick={() => setConfirmOpen(false)}>
+                {t('todo.cancel')}
+              </button>
+              <button type="button" className="me-btn me-btn-danger" disabled={busy} onClick={confirmDeleteNow}>
+                {t('todo.deleteConfirmOk')}
               </button>
             </div>
           </div>

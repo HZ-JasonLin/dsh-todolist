@@ -3789,12 +3789,13 @@
 .me-week-event--dragging,
 .me-week-event--dragging:hover {
   z-index: 4;
-  border-color: var(--me-week-accent, var(--me-blue-strong));
-  background: color-mix(in srgb, var(--me-week-accent, var(--me-blue-strong)) 12%, var(--dsw-alias-bg-base));
-  box-shadow: 0 3px 10px color-mix(in srgb, var(--me-week-accent, var(--me-blue-strong)) 22%, transparent);
+  opacity: 1;
+  border-color: var(--me-blue-strong, #2563eb);
+  border-left-color: var(--me-blue-strong, #2563eb);
+  background: var(--dsw-alias-bg-base);
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--me-blue-strong, #2563eb) 25%, transparent);
   cursor: grabbing;
   touch-action: none;
-  opacity: 0.8;
 }
 
 .me-week-event--done {
@@ -3885,7 +3886,7 @@
 /* 今日视图卡片：复用周视图信息卡片结构，但第一列放完成勾选框（替代圆点）。 */
 .me-week-event--today {
   grid-template-columns: 18px minmax(0, 1fr);
-  cursor: default;
+  cursor: pointer;
 }
 
 .me-week-event--today .me-todo-check {
@@ -3969,13 +3970,11 @@
   pointer-events: none;
 }
 
-/* Keep native desktop dragging without blocking ordinary touch scrolling. */
-.me-calendar-span,
-.me-calendar-span--dragging {
-  cursor: grab;
-}
-
+/* Keep native desktop dragging without blocking ordinary touch scrolling.
+   指针统一：悬停一律「点击」指针（cursor: pointer），只有拖动中的元素
+   才切换成「拖动」指针（grabbing）。 */
 .me-calendar-span {
+  cursor: pointer;
   touch-action: auto;
 }
 
@@ -3994,7 +3993,8 @@
   cursor: grabbing;
 }
 
-/* Drop target guides: before = upper insertion line, after = lower line. */
+/* Drop target guides: before = upper insertion line, after = lower line.
+   固定蓝色实线（不随任务色变化），清晰表达"插入到这里"。 */
 .me-calendar-span--drop-before,
 .me-calendar-span--drop-after {
   position: relative;
@@ -4007,20 +4007,18 @@
   left: 0;
   right: 0;
   z-index: 5;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--me-span-drop-color);
+  height: 3px;
+  border-radius: 2px;
+  background: var(--me-blue-strong, #2563eb);
   pointer-events: none;
 }
 
 .me-calendar-span--drop-before::before {
-  top: -1px;
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--me-span-drop-color) 22%, transparent);
+  top: -2px;
 }
 
 .me-calendar-span--drop-after::after {
-  bottom: -1px;
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--me-span-drop-color) 22%, transparent);
+  bottom: -2px;
 }
 
 /* Date surfaces scroll normally until the range gesture becomes active. */
@@ -4696,7 +4694,7 @@
   min-height: 34px;
   padding: 10px 0 8px;
   background: var(--dsw-alias-bg-layer-1);
-  cursor: grab;
+  cursor: pointer;
   user-select: none;
 }
 
@@ -4883,4 +4881,95 @@ body[data-dsh-todolist-dragging] #root {
   .todo-fallback-resize {
     display: none;
   }
+}
+
+/* ============================================================
+ * 日历交互增强（2026-08-19 用户反馈）
+ * 1) 今天日期圆：数字恒为白字，覆盖「逾期红字」（加类提高优先级，
+ *    任何源码顺序都赢），圆圈保持蓝底。
+ * 2) 折叠入口「+N / 收起」落在溢出日期所在列（不再横跨整行贴到最右列），
+ *    单独占一行轨道避免压住最后一条任务。
+ * 3) 拖动任务改日期时的落点格高亮。
+ * ============================================================ */
+
+.me-cal-cell--today.me-cal-cell--overdue .me-cal-cell-date,
+.me-cal-cell--today.me-cal-cell--selected .me-cal-cell-date,
+.me-cal-cell--today .me-cal-cell-date {
+  background: var(--me-blue-strong, var(--dsw-static-blue-6, #2563eb));
+  color: var(--dsw-alias-label-on-primary, var(--dsw-static-neutral-00, #fff));
+}
+
+.me-calendar-more {
+  grid-column: auto;
+  justify-self: start;
+  align-self: center;
+  background: var(--dsw-alias-interactive-bg-active, rgba(128, 128, 128, 0.12));
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.25));
+}
+
+.me-calendar-more:hover,
+.me-calendar-more:focus-visible {
+  background: var(--me-blue-muted);
+  border-color: var(--me-blue-strong);
+  color: var(--me-blue-strong);
+  outline: none;
+}
+
+.me-cal-cell--drop-day {
+  outline: 2px dashed var(--me-blue-strong, #2563eb);
+  outline-offset: -3px;
+  background: var(--me-blue-muted);
+}
+
+.me-week-column--drop-day {
+  outline: 2px dashed var(--me-blue-strong, #2563eb);
+  outline-offset: -3px;
+  background: color-mix(in srgb, var(--me-blue-strong, #2563eb) 8%, var(--dsw-alias-bg-layer-1));
+}
+
+/* 指针行为（用户反馈）：悬停一律点击指针，只有长按拖日期/拖任务时才是拖动指针 */
+.me-week-column {
+  cursor: pointer;
+}
+
+.me-panel--range-dragging .me-cal-cell,
+.me-panel--range-dragging .me-week-column,
+.me-panel--range-dragging .me-week-date-head,
+.me-panel--range-dragging .me-cal-cell-date,
+.me-calendar-span--dragging,
+.me-calendar-span--dragging:hover,
+.me-week-event--dragging,
+.me-week-event--dragging:hover {
+  cursor: grabbing;
+}
+
+/* 列表行 / 看板卡片：整行点击直接编辑（用户反馈：去掉行内编辑/删除按钮）。 */
+.me-todo-item,
+.me-todo-card {
+  cursor: pointer;
+}
+
+/* 删除二次确认弹窗：叠在编辑弹窗之上（更高 z-index），小尺寸居中。 */
+.me-modal-confirm {
+  z-index: 1100;
+}
+
+.me-modal-box-confirm {
+  max-width: 400px;
+}
+
+.me-modal-confirm-text {
+  margin: 4px 0 8px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.me-modal-confirm-text strong {
+  color: var(--dsw-alias-label-primary);
+}
+
+.me-modal-foot-spacer {
+  flex: 1;
 }
