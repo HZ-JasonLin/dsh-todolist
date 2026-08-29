@@ -43,15 +43,6 @@ const NS = 'todolist'
 export const zh = {
   ...dictZh,
   'tab.title': '待办',
-  'tab.title.pending': '待办 ({count})',
-  'suggestions.title': 'AI 提议的待办（确认后写入；也可直接说"记住…"让我用 todolist 直写）',
-  'suggestions.empty': '没有待确认的待办建议。',
-  'suggestions.approve': '采纳',
-  'suggestions.reject': '拒绝',
-  'suggestions.approveAll': '全部采纳',
-  'suggestions.approved': '已采纳并写入待办',
-  'suggestions.rejected': '已拒绝',
-  'suggestions.done': '操作完成',
   'todo.startShort': '开始',
   'todo.dueShort': '截止',
   'todo.fallback.open': '打开今日待办侧栏',
@@ -63,15 +54,6 @@ export const zh = {
 export const en = {
   ...dictEn,
   'tab.title': 'Todos',
-  'tab.title.pending': 'Todos ({count})',
-  'suggestions.title': 'AI-proposed todos (approve to write; or just tell me “remember…” and I file them directly)',
-  'suggestions.empty': 'No pending todo suggestions.',
-  'suggestions.approve': 'Approve',
-  'suggestions.reject': 'Reject',
-  'suggestions.approveAll': 'Approve all',
-  'suggestions.approved': 'Approved and written to todos',
-  'suggestions.rejected': 'Rejected',
-  'suggestions.done': 'Done',
   'todo.startShort': 'Start',
   'todo.dueShort': 'Due',
   'todo.fallback.open': 'Open Today todo sidebar',
@@ -88,9 +70,6 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 /** Cordis service injections. */
 export const inject = ['slots', 'locale', 'conversation']
-
-/** Badge poll interval (ms). */
-const BADGE_POLL_MS = 30_000
 
 /**
  * Client plugin body.
@@ -115,7 +94,6 @@ export function apply(ctx: Context): void {
   }, 'todolist: stylesheet')
 
   // —— 对话页顶部 Tab（conversation.view，order 30 = 原待办入口位置）——
-  let badgeCount = 0
   let disposeTopTab: (() => void) | undefined
 
   const registerTopTab = (): void => {
@@ -125,26 +103,10 @@ export function apply(ctx: Context): void {
         name: 'conversation.view',
         id: 'todolist-hub',
         order: 30,
-        label: () => (badgeCount > 0 ? t('tab.title.pending', { count: badgeCount }) : t('tab.title')),
+        label: () => t('tab.title'),
       }, (props) => TodoTabView({ ...props, t })))
   }
   registerTopTab()
-
-  const refreshBadge = (): void => {
-    void fetch('/todolist/api/suggestions')
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-      .then((data: { entries?: unknown[] }) => {
-        const next = data.entries?.length ?? 0
-        if (next !== badgeCount) {
-          badgeCount = next
-          // 计数变化 → 重注册 Tab 让 label 重求值
-          registerTopTab()
-        }
-      })
-      .catch(() => { /* badge 尽力而为 */ })
-  }
-  refreshBadge()
-  const badgeTimer = window.setInterval(refreshBadge, BADGE_POLL_MS)
 
   // —— 侧栏宿主让渡：better-sidebar 存在时注册 Tab，否则挂载独立 Today 抽屉。——
   let hostSynced = false
@@ -208,7 +170,6 @@ export function apply(ctx: Context): void {
   const hostTimer = window.setInterval(syncSidebarHost, 1_000)
 
   ctx.effect(() => () => {
-    window.clearInterval(badgeTimer)
     window.clearInterval(hostTimer)
     disposeTopTab?.()
     disposeSidebarTab?.()

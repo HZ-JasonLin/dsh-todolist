@@ -62,6 +62,8 @@ const DONE_STATUSES = new Set(['done', 'cancelled'])
  */
 let persistedViewMode: TodoViewMode | null = null
 const PROJECT_ORDER_KEY = 'dsh-todolist:project-order'
+/** 项目看板「新建卡片」创建的空分类列（尚无任务的占位项目）。 */
+const EMPTY_PROJECTS_KEY = 'dsh-todolist:empty-projects'
 
 function loadProjectOrder(): string[] {
   try {
@@ -70,6 +72,19 @@ function loadProjectOrder(): string[] {
   } catch {
     return []
   }
+}
+
+function loadEmptyProjects(): string[] {
+  try {
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(EMPTY_PROJECTS_KEY) ?? '[]')
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function saveEmptyProjects(projects: string[]): void {
+  window.localStorage.setItem(EMPTY_PROJECTS_KEY, JSON.stringify(projects))
 }
 
 /** 统一请求宿主 API（/todolist 前缀）；非 2xx 或业务失败（ok:false）均抛错。 */
@@ -219,8 +234,11 @@ function repeatDayMatches(item: TodoItem, d: Date): boolean {
   return false
 }
 
-/** 月历/周视图共同的事项顺序：持久化 calendarOrder 优先，旧数据稳定回退。 */
+/** 月历/周/今日视图共用的顺序：已完成事项自动沉底（最高优先级），
+ *  未完成之间按持久化 calendarOrder 排序，旧数据稳定回退。 */
 function compareCalendarItems(a: TodoItem, b: TodoItem): number {
+  const byDone = Number(DONE_STATUSES.has(a.status)) - Number(DONE_STATUSES.has(b.status))
+  if (byDone !== 0) return byDone
   const orderOf = (item: TodoItem): number => (
     typeof item.calendarOrder === 'number' && Number.isFinite(item.calendarOrder)
       ? item.calendarOrder
@@ -228,8 +246,6 @@ function compareCalendarItems(a: TodoItem, b: TodoItem): number {
   )
   const byOrder = orderOf(a) - orderOf(b)
   if (byOrder !== 0) return byOrder
-  const byDone = Number(DONE_STATUSES.has(a.status)) - Number(DONE_STATUSES.has(b.status))
-  if (byDone !== 0) return byDone
   return String(a.time).localeCompare(String(b.time)) || a.id.localeCompare(b.id)
 }
 
@@ -486,6 +502,16 @@ export function TodoView(props: TodoViewProps): JSX.Element {
   const [projectOrder, setProjectOrder] = useState<string[]>(loadProjectOrder)
   const [draggingProject, setDraggingProject] = useState<string | null>(null)
   const [projectDrop, setProjectDrop] = useState<{ key: string; position: 'before' | 'after' } | null>(null)
+  /** 项目看板「新建卡片」创建的空分类列（持久化于 localStorage）。 */
+  const [emptyProjects, setEmptyProjects] = useState<string[]>(loadEmptyProjects)
+  /** 「新建卡片」内联表单状态。 */
+  const [newProjOpen, setNewProjOpen] = useState(false)
+  const [newProjName, setNewProjName] = useState('')
+  /** 顶部镜像滚动条与看板的双向同步。 */
+  const boardRef = useRef<HTMLDivElement | null>(null)
+  const scrollbarRef = useRef<HTMLDivElement | null>(null)
+  const spacerRef = useRef<HTMLDivElement | null>(null)
+  const syncingScrollRef = useRef(false)
   /** 页签行的项目切换（'' = 全部项目；非空时全局按项目过滤）。 */
   const [projectFilter, setProjectFilter] = useState('')
   /** 添加弹窗：开关 + 表单草稿。 */
@@ -537,6 +563,37 @@ export function TodoView(props: TodoViewProps): JSX.Element {
     window.addEventListener('todolist:changed', onChange)
     return () => window.removeEventListener('todolist:changed', onChange)
   }, [load])
+
+  /** 顶部镜像滚动条：看板 → 轨道。 */
+  const syncScrollFromBoard = (): void => {
+    if (syncingScrollRef.current) return
+    const board = boardRef.current
+    const bar = scrollbarRef.current
+    if (board === null || bar === null) return
+    syncingScrollRef.current = true
+    if (bar.scrollLeft !== board.scrollLeft) bar.scrollLeft = board.scrollLeft
+    syncingScrollRef.current = false
+  }
+
+  /** 顶部镜像滚动条：轨道 → 看板。 */
+  const syncScrollFromBar = (): void => {
+    if (syncingScrollRef.current) return
+    const board = boardRef.current
+    const bar = scrollbarRef.current
+    if (board === null || bar === null) return
+    syncingScrollRef.current = true
+    if (board.scrollLeft !== bar.scrollLeft) board.scrollLeft = bar.scrollLeft
+    syncingScrollRef.current = false
+  }
+
+  // 每次渲染后同步 spacer 宽度（列增删/拖拽后内容宽度变化；宽度即看板 scrollWidth）
+  useEffect(() => {
+    const board = boardRef.current
+    const spacer = spacerRef.current
+    if (board !== null && spacer !== null) {
+      spacer.style.width = `${board.scrollWidth}px`
+    }
+  })
 
   /** 短暂成功提示。 */
   const flash = (text: string): void => {
@@ -1405,7 +1462,8 @@ export function TodoView(props: TodoViewProps): JSX.Element {
               const hiddenCol = overflowSegments.length > 0
                 ? Math.min(...overflowSegments.map((segment) => segment.startIndex)) % 7
                 : -1
-              // 「+N / 收起」独占一行轨道，避免与最后一条可见泳道重叠。
+              // 「+N / 收起」独占一行轨道，避免与最后一条可见泳道重叠；
+              // 行高与轨道数严格一致；行底内边距保持 6px 呼吸感（勿再压小，会贴底）。
               const rowStyle = {
                 '--me-span-lanes': Math.max(laneCount, hiddenSegments.length > 0 ? 1 : 0) + (isExpanded || hiddenSegments.length > 0 ? 1 : 0),
               } as CSSProperties
@@ -1797,6 +1855,12 @@ export function TodoView(props: TodoViewProps): JSX.Element {
     }
     for (const entries of groups.values()) {
       entries.sort((a, b) => {
+        // 完成沉底必须作为最高优先级分流：'9' 与 '9999-99-99'（无日期任务）
+        // 的字符串比较会因前缀关系颠倒顺序（'9' < '9999…'），导致已完成
+        // 任务排到周期任务（due=null）前面。分流后按日期/时间排序。
+        const aDone = DONE_STATUSES.has(a.status)
+        const bDone = DONE_STATUSES.has(b.status)
+        if (aDone !== bDone) return aDone ? 1 : -1
         const byDate = sortKey(a).localeCompare(sortKey(b))
         return byDate !== 0 ? byDate : String(a.time).localeCompare(String(b.time))
       })
@@ -1813,6 +1877,8 @@ export function TodoView(props: TodoViewProps): JSX.Element {
       }),
     ]
     const keys = projectFilter !== '' ? [projectFilter] : orderedKeys
+    // 空分类列：新建卡片后尚无任务的占位项目（已有真实任务的不再显示为空列）
+    const emptyKeys = emptyProjects.filter((key) => !availableKeys.includes(key))
 
     const moveProject = (targetKey: string, position: 'before' | 'after'): void => {
       if (draggingProject === null || draggingProject === targetKey) return
@@ -1823,10 +1889,49 @@ export function TodoView(props: TodoViewProps): JSX.Element {
       window.localStorage.setItem(PROJECT_ORDER_KEY, JSON.stringify(next))
     }
 
+    /** 「新建卡片」确认：创建空分类列（重名不重复创建）。 */
+    const confirmNewProject = (): void => {
+      const name = newProjName.trim()
+      if (name === '') return
+      setEmptyProjects((current) => {
+        if (current.includes(name) || availableKeys.includes(name)) return current
+        const next = [...current, name]
+        saveEmptyProjects(next)
+        return next
+      })
+      setNewProjOpen(false)
+      setNewProjName('')
+    }
+
+    /** 移除空分类列。 */
+    const removeEmptyProject = (key: string): void => {
+      setEmptyProjects((current) => {
+        const next = current.filter((value) => value !== key)
+        saveEmptyProjects(next)
+        return next
+      })
+    }
+
     return (
       <div className="me-proj">
-        <div className="me-proj-board" role="region" aria-label={t('todo.view.project')} tabIndex={0}>
-          {keys.map((key) => {
+        <div className="me-proj-scroll">
+          <div
+            className="me-proj-scrollbar"
+            ref={scrollbarRef}
+            onScroll={syncScrollFromBar}
+            aria-hidden="true"
+          >
+            <div className="me-proj-scrollbar-spacer" ref={spacerRef} />
+          </div>
+          <div
+            className="me-proj-board"
+            role="region"
+            aria-label={t('todo.view.project')}
+            tabIndex={0}
+            ref={boardRef}
+            onScroll={syncScrollFromBoard}
+          >
+            {keys.map((key) => {
             const entries = groups.get(key) ?? []
             const doneCount = entries.filter((item) => DONE_STATUSES.has(item.status)).length
             const projectName = key === '' ? t('todo.project.none') : key
@@ -1893,6 +1998,74 @@ export function TodoView(props: TodoViewProps): JSX.Element {
               </section>
             )
           })}
+            {emptyKeys.map((key) => (
+              <section
+                key={`__empty__${key}`}
+                className="me-proj-group me-proj-group--empty"
+              >
+                <header className="me-proj-head">
+                  <div className="me-proj-heading">
+                    <span className="me-proj-title">{key}</span>
+                    <span className="me-proj-count">0/0</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="me-btn me-icon-btn me-proj-head-remove"
+                    title={t('todo.proj.remove')}
+                    aria-label={t('todo.proj.remove')}
+                    onClick={() => removeEmptyProject(key)}
+                  >×</button>
+                </header>
+                <div className="me-proj-body" />
+                <button
+                  type="button"
+                  className="me-proj-add"
+                  onClick={() => openAddForProject(key)}
+                >＋ {t('todo.add')}</button>
+              </section>
+            ))}
+            {projectFilter === '' && (
+              <div className="me-proj-add-card">
+                {newProjOpen ? (
+                  <div className="me-proj-add-card-form">
+                    <input
+                      autoFocus
+                      type="text"
+                      value={newProjName}
+                      placeholder={t('todo.proj.newPlaceholder')}
+                      onChange={(event) => setNewProjName(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault()
+                          confirmNewProject()
+                        } else if (event.key === 'Escape') {
+                          setNewProjOpen(false)
+                          setNewProjName('')
+                        }
+                      }}
+                    />
+                    <div className="me-proj-add-card-actions">
+                      <button type="button" className="me-btn me-btn-primary" onClick={confirmNewProject}>{t('todo.add')}</button>
+                      <button
+                        type="button"
+                        className="me-btn"
+                        onClick={() => {
+                          setNewProjOpen(false)
+                          setNewProjName('')
+                        }}
+                      >{t('todo.cancel')}</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="me-proj-add-card-btn"
+                    onClick={() => setNewProjOpen(true)}
+                  >＋ {t('todo.proj.new')}</button>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     )

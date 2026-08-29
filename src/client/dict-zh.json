@@ -1,7 +1,6 @@
 {
   "todosTab.label": "待办",
   "todosTab.label.pending": "🔴 待办 ({count})",
-  "todosTab.feature.todoSuggestions": "待确认待办管理",
   "todosTab.feature.todo": "待办",
   "todo.track.all": "全部",
   "todo.track": "待办轨",
@@ -92,9 +91,9 @@
   "todo.whoPlaceholder": "负责人（如设计师、程序员）",
   "todo.board.empty": "此象限暂无待办",
   "todo.board.cycleStatus": "点击切换状态",
+  "todo.proj.new": "新建卡片",
+  "todo.proj.newPlaceholder": "分类名称",
+  "todo.proj.remove": "移除该分类",
   "memoryTab.delete": "删除",
-  "panel.todoSuggestions.title": "待确认待办建议",
-  "panel.todoSuggestions.empty": "没有待确认的待办建议。",
-  "panel.todoSuggestions.help": "后台审查产出的待办建议：采纳后写入对应待办轨（待办不能变成记忆）；归档保留备查；拒绝丢弃。",
   "panel.loading": "加载中…"
 }

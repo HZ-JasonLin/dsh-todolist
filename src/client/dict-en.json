@@ -1,7 +1,6 @@
 {
   "todosTab.label": "Todos",
   "todosTab.label.pending": "🔴 Todos ({count})",
-  "todosTab.feature.todoSuggestions": "Todo suggestions",
   "todosTab.feature.todo": "Todos",
   "todo.track.all": "All",
   "todo.track": "Track",
@@ -92,9 +91,9 @@
   "todo.whoPlaceholder": "Owner (e.g. name)",
   "todo.board.empty": "No todos in this quadrant",
   "todo.board.cycleStatus": "Click to cycle status",
+  "todo.proj.new": "New column",
+  "todo.proj.newPlaceholder": "Column name",
+  "todo.proj.remove": "Remove this column",
   "memoryTab.delete": "Delete",
-  "panel.todoSuggestions.title": "Pending todo suggestions",
-  "panel.todoSuggestions.empty": "No pending todo suggestions.",
-  "panel.todoSuggestions.help": "Todo suggestions from the background review: approve writes into the matching todo track (a todo stays a todo); archive keeps aside; reject drops.",
   "panel.loading": "Loading…"
 }
